@@ -39,9 +39,7 @@ let camPhi = Math.PI / 2;
 const CAM_RADIUS = 40;
 let cameraTarget = new THREE.Vector3(0, 0, 0); 
 
-// [변경] 엄지 인식 기준값 (비율)
-// 엄지 끝~뿌리 거리가 뼈 길이의 1.3배보다 크면 '펴짐', 작으면 '접힘'
-const THUMB_RATIO_THRESHOLD = 1.3; 
+const THUMB_OPEN_RATIO = 1.5; 
 
 let currentHexColor = 0xff3333; 
 let isEraserMode = false; 
@@ -192,7 +190,6 @@ function animate() {
     renderer.render(scene, camera);
 }
 
-// [손가락 펴짐 판별] - 손목 기준 거리 비교 (손등/손바닥 무관)
 function isFingerExtended(landmarks, tipIdx, mcpIdx) {
     const wrist = landmarks[0];
     const tip = landmarks[tipIdx];
@@ -201,7 +198,6 @@ function isFingerExtended(landmarks, tipIdx, mcpIdx) {
     const distTip = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
     const distMcp = Math.hypot(mcp.x - wrist.x, mcp.y - wrist.y);
 
-    // 팁이 MCP보다 1.3배 이상 멀리 있으면 펴진 것으로 간주
     return distTip > (distMcp * 1.3);
 }
 
@@ -209,7 +205,10 @@ function isFingerExtended(landmarks, tipIdx, mcpIdx) {
 function onResults(results) {
     canvasCtx.save();
     canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+    
+    // 캔버스 그리기 (반전 없음, CSS 처리)
     canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+    
     canvasCtx.restore();
 
     const oldPreview = blockGroup.getObjectByName('previewBlock');
@@ -230,75 +229,36 @@ function onResults(results) {
         const indexTip = landmarks[8];
         const thumbTip = landmarks[4];
         
-        // 1. 검지, 중지, 약지, 소지 판별 (손목 거리 기준)
+        // 손가락 상태 판별
         const isIndexOpen = isFingerExtended(landmarks, 8, 5);
         const isMiddleOpen = isFingerExtended(landmarks, 12, 9);
         const isMiddleClosed = !isMiddleOpen;
         const isRingClosed = !isFingerExtended(landmarks, 16, 13);
         const isPinkyClosed = !isFingerExtended(landmarks, 20, 17);
 
-        // 2. [엄지 판별 로직 수정] - 관절 꺾임 비율 방식
-        // Landmark 4(끝), 3(중간, IP), 2(뿌리, MCP)
+        // 엄지 판별 (비율 방식)
         const thumbTipPos = landmarks[4];
         const thumbIpPos = landmarks[3];
         const thumbMcpPos = landmarks[2];
-
-        // 엄지 전체 길이 (끝 ~ 뿌리) - 굽히면 짧아짐
         const thumbTotalLen = Math.hypot(thumbTipPos.x - thumbMcpPos.x, thumbTipPos.y - thumbMcpPos.y);
-        
-        // 엄지 뼈 길이 (중간 ~ 뿌리) - 기준값 (변하지 않음)
         const thumbBoneLen = Math.hypot(thumbIpPos.x - thumbMcpPos.x, thumbIpPos.y - thumbMcpPos.y);
-
-        // 비율 계산
         const thumbRatio = thumbTotalLen / thumbBoneLen;
 
-        // 비율이 높으면(1.5 이상) 펴짐, 낮으면(1.2 이하) 굽힘
-        const isThumbOpen = thumbRatio > THUMB_RATIO_THRESHOLD;
-        const isThumbClosed = !isThumbOpen;
+        const isThumbStrictlyOpen = thumbRatio > THUMB_OPEN_RATIO;
+        const isThumbConsideredClosed = !isThumbStrictlyOpen;
 
         const hasBlocks = blocks.length > 0;
 
-        // [모드 1] 회전 (검지+중지 Open / 엄지 Closed)
-        if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbClosed && isRingClosed && isPinkyClosed) {
-            isScaling = false; 
-            isPanning = false;
-            if (!isRotating) {
-                isRotating = true;
-                lastHandPos.x = indexTip.x;
-                lastHandPos.y = indexTip.y;
-            } else {
-                const deltaX = (indexTip.x - lastHandPos.x) * ROTATION_SPEED;
-                const deltaY = (indexTip.y - lastHandPos.y) * ROTATION_SPEED;
-                camTheta += deltaX * 2; 
-                camPhi -= deltaY * 2;   
-                updateCameraPosition();
-                lastHandPos.x = indexTip.x;
-                lastHandPos.y = indexTip.y;
-            }
-            showGuideText("🔄 화면 회전");
-        }
-        
-        // [모드 2] 확대/축소 (검지+엄지 Open)
-        else if (hasBlocks && isIndexOpen && isThumbOpen && isMiddleClosed && isRingClosed && isPinkyClosed) {
-            isRotating = false; 
-            isPanning = false;
-            const pinchDist = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
-            if (!isScaling) {
-                isScaling = true;
-                initialPinchDistance = pinchDist;
-                initialGroupScale = blockGroup.scale.x;
-            } else {
-                const scaleFactor = pinchDist / initialPinchDistance;
-                let newScale = initialGroupScale * scaleFactor;
-                newScale = Math.max(0.2, Math.min(5.0, newScale));
-                blockGroup.scale.set(newScale, newScale, newScale);
-            }
-            const percent = Math.round(blockGroup.scale.x * 100);
-            showGuideText(`🔍 크기 조절: ${percent}%`);
-        }
+        // [중요] 카메라 모드에 따른 좌우 방향 보정값 (1: 정방향, -1: 역방향)
+        // 후면 카메라(!isFrontCamera)일 때 좌우 움직임을 반전시킴
+        const dirX = isFrontCamera ? 1 : -1;
 
-        // [모드 3] 중심 이동 (검지+중지+엄지 Open)
-        else if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbOpen && isRingClosed && isPinkyClosed) {
+        // ========================================================
+        // [우선순위 1] 손가락 2개 이상 (회전 / 중심 이동)
+        // ========================================================
+        
+        // 1-1. 중심 이동 (검지+중지+엄지 Open)
+        if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbStrictlyOpen && isRingClosed && isPinkyClosed) {
             isRotating = false;
             isScaling = false;
             if (!isPanning) {
@@ -314,7 +274,8 @@ function onResults(results) {
                 camRight.crossVectors(camDir, camera.up).normalize(); 
                 const camUp = new THREE.Vector3().copy(camera.up).normalize();
 
-                const moveX = camRight.multiplyScalar(deltaX * PAN_SPEED); 
+                // [수정] dirX를 곱해서 후면 카메라일 때 반대로 이동하게 함
+                const moveX = camRight.multiplyScalar(deltaX * PAN_SPEED * dirX); 
                 const moveY = camUp.multiplyScalar(deltaY * PAN_SPEED); 
 
                 cameraTarget.add(moveX).add(moveY);
@@ -325,28 +286,70 @@ function onResults(results) {
             showGuideText("🖐️ 중심 이동");
         }
 
-        // [모드 4] 설치 OR 삭제 (검지 ☝️)
-        else if (isIndexOpen && isThumbClosed && isMiddleClosed && isRingClosed && isPinkyClosed) {
+        // 1-2. 회전 (검지+중지 Open, 엄지 Closed)
+        else if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbConsideredClosed && isRingClosed && isPinkyClosed) {
+            isScaling = false; 
+            isPanning = false;
+            if (!isRotating) {
+                isRotating = true;
+                lastHandPos.x = indexTip.x;
+                lastHandPos.y = indexTip.y;
+            } else {
+                const deltaX = (indexTip.x - lastHandPos.x) * ROTATION_SPEED;
+                const deltaY = (indexTip.y - lastHandPos.y) * ROTATION_SPEED;
+                
+                // [수정] dirX를 곱해서 후면 카메라일 때 반대로 회전하게 함
+                camTheta += deltaX * 2 * dirX; 
+                
+                camPhi -= deltaY * 2;   
+                updateCameraPosition();
+                lastHandPos.x = indexTip.x;
+                lastHandPos.y = indexTip.y;
+            }
+            showGuideText("🔄 화면 회전");
+        }
+        
+        // ========================================================
+        // [우선순위 2] 설치 / 삭제 (검지 ☝️)
+        // ========================================================
+        else if (isIndexOpen && isMiddleClosed && isRingClosed && isPinkyClosed && isThumbConsideredClosed) {
             isRotating = false;
             isScaling = false;
             isPanning = false;
 
-            if (isEraserMode) {
-                processPlacement(indexTip, false);
-                showGuideText("❌ 지우개 모드");
+            if (!hasBlocks) {
+                processPlacement(indexTip, true);
+                showGuideText("☝️ 첫 블럭 설치");
             } else {
-                processPlacement(indexTip, false);
-                showGuideText("☝️ 블럭 덧붙이기");
+                if (isEraserMode) {
+                    processPlacement(indexTip, false);
+                    showGuideText("❌ 지우개 모드");
+                } else {
+                    processPlacement(indexTip, false);
+                    showGuideText("☝️ 블럭 덧붙이기");
+                }
             }
         } 
-        
-        // [초기 모드] 블럭 없음 -> 쉬운 설치
-        else if (!hasBlocks && isIndexOpen && isMiddleClosed) {
-            isRotating = false;
-            isScaling = false;
+
+        // ========================================================
+        // [우선순위 3] 확대/축소 (검지+엄지 Open)
+        // ========================================================
+        else if (hasBlocks && isIndexOpen && isMiddleClosed && isRingClosed && isPinkyClosed && isThumbStrictlyOpen) {
+            isRotating = false; 
             isPanning = false;
-            processPlacement(indexTip, true);
-            showGuideText("☝️ 첫 블럭 설치");
+            const pinchDist = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+            if (!isScaling) {
+                isScaling = true;
+                initialPinchDistance = pinchDist;
+                initialGroupScale = blockGroup.scale.x;
+            } else {
+                const scaleFactor = pinchDist / initialPinchDistance;
+                let newScale = initialGroupScale * scaleFactor;
+                newScale = Math.max(0.2, Math.min(5.0, newScale));
+                blockGroup.scale.set(newScale, newScale, newScale);
+            }
+            const percent = Math.round(blockGroup.scale.x * 100);
+            showGuideText(`🔍 크기 조절: ${percent}%`);
         }
         
         else {
@@ -396,7 +399,9 @@ function processPlacement(indexTip, isInitialMode) {
 
                 const pixelX = indexTip.x * canvasElement.width;
                 const pixelY = indexTip.y * canvasElement.height;
-                drawLoadingRing(pixelX, pixelY, progress, true); 
+                let drawX = pixelX;
+                
+                drawLoadingRing(drawX, pixelY, progress, true); 
 
                 const delGeo = new THREE.BoxGeometry(BLOCK_SIZE * 1.05, BLOCK_SIZE * 1.05, BLOCK_SIZE * 1.05);
                 const delMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.8 });
