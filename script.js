@@ -2,7 +2,7 @@
 let scene, camera, renderer, controls;
 let videoElement, canvasElement, canvasCtx;
 let hands;
-let mpCamera; // MediaPipe Camera 객체 저장용
+let mpCamera; 
 
 const BLOCK_SIZE = 2.0; 
 const GRID_SIZE = BLOCK_SIZE;
@@ -43,7 +43,6 @@ const THUMB_OPEN_THRESHOLD = 0.12;
 let currentHexColor = 0xff3333; 
 let isEraserMode = false; 
 
-// [추가] 카메라 모드 상태 (true: 전면, false: 후면)
 let isFrontCamera = true;
 
 // --- 2. 초기화 실행 ---
@@ -55,11 +54,8 @@ window.onload = function() {
     resizeCanvasToDisplaySize();
 
     document.getElementById('clearBtn').addEventListener('click', clearAllBlocks);
-    
-    // [추가] 카메라 전환 버튼 이벤트
     document.getElementById('cameraBtn').addEventListener('click', toggleCamera);
 
-    // 색상 팔레트 이벤트
     const swatches = document.querySelectorAll('.color-swatch');
     swatches.forEach(swatch => {
         swatch.addEventListener('click', (e) => {
@@ -87,17 +83,12 @@ function resizeCanvasToDisplaySize() {
     canvasElement.height = window.innerHeight;
 }
 
-// [신규] 카메라 전환 함수
 function toggleCamera() {
-    isFrontCamera = !isFrontCamera; // 상태 토글
-    
-    // 기존 카메라 스트림 중지 (중요: 이걸 안 하면 카메라가 안 바뀜)
+    isFrontCamera = !isFrontCamera; 
     if (videoElement.srcObject) {
         const tracks = videoElement.srcObject.getTracks();
         tracks.forEach(track => track.stop());
     }
-
-    // 카메라 다시 시작
     startMediaPipeCamera();
 }
 
@@ -198,28 +189,34 @@ function animate() {
     renderer.render(scene, camera);
 }
 
+// [핵심 함수] 손가락이 펴졌는지 판단하는 새로운 방식 (손목 기준 거리)
+// 손등을 보이거나 손을 앞으로 뻗어도 정확하게 인식합니다.
+function isFingerExtended(landmarks, fingerTipIdx, fingerPipIdx) {
+    const wrist = landmarks[0];
+    const tip = landmarks[fingerTipIdx];
+    const pip = landmarks[fingerPipIdx];
+
+    // 손목-끝 거리
+    const distTip = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
+    // 손목-중간관절 거리
+    const distPip = Math.hypot(pip.x - wrist.x, pip.y - wrist.y);
+
+    // 끝이 중간관절보다 손목에서 더 멀면 '펴진 것'으로 간주
+    return distTip > distPip;
+}
+
 // --- 4. MediaPipe 로직 ---
 function onResults(results) {
     canvasCtx.save();
     canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
     
-    // [중요] 후면 카메라일 때는 좌우 반전(거울 모드)을 끕니다.
-    // 전면 카메라(isFrontCamera)일 때만 이미지를 반전시켜 그림
     if (isFrontCamera) {
         canvasCtx.scale(-1, 1);
         canvasCtx.drawImage(results.image, -canvasElement.width, 0, canvasElement.width, canvasElement.height);
     } else {
-        // 후면 카메라는 있는 그대로 그림
         canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
     }
-    
-    // 캔버스 설정 복구 (좌표계가 꼬이지 않게)
     canvasCtx.restore();
-
-    // 여기서부터는 좌표계가 원래대로 돌아오므로,
-    // 전면 카메라일 때 랜드마크를 그릴 때도 X좌표를 뒤집어서 그려야 합니다.
-    // 하지만 drawConnectors 유틸은 좌표를 그대로 씁니다.
-    // Three.js 레이캐스팅을 위해 mouse 좌표 계산시 이 반전 여부를 고려해야 합니다.
 
     const oldPreview = blockGroup.getObjectByName('previewBlock');
     if (oldPreview) blockGroup.remove(oldPreview);
@@ -233,30 +230,29 @@ function onResults(results) {
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const landmarks = results.multiHandLandmarks[0];
         
-        // 캔버스에 손 그리기
-        // (전면 카메라일 때 캔버스 자체를 CSS로 반전시키는 방법이 있고, 그리기 로직에서 반전하는 방법이 있습니다.)
-        // 기존 코드에서는 CSS transform: scaleX(-1)을 썼으므로, JS에서는 그대로 그려도 됩니다.
-        // 다만 후면 카메라일 때는 CSS 반전을 꺼야 합니다.
-        
         drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
         drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 2});
 
         const indexTip = landmarks[8];
         const thumbTip = landmarks[4];
         
-        const isIndexOpen = landmarks[8].y < landmarks[6].y;
-        const isMiddleOpen = landmarks[12].y < landmarks[10].y;
+        // [변경] 새로운 방식(거리 기반)으로 손가락 상태 판별
+        // 검지(8), 중지(12), 약지(16), 소지(20)는 PIP 관절(6, 10, 14, 18)과 비교
+        const isIndexOpen = isFingerExtended(landmarks, 8, 6);
+        const isMiddleOpen = isFingerExtended(landmarks, 12, 10);
         const isMiddleClosed = !isMiddleOpen;
-        const isRingClosed = landmarks[16].y > landmarks[14].y;
-        const isPinkyClosed = landmarks[20].y > landmarks[18].y;
+        const isRingClosed = !isFingerExtended(landmarks, 16, 14);
+        const isPinkyClosed = !isFingerExtended(landmarks, 20, 18);
 
+        // 엄지 상태 (기존 거리 방식 유지하되 후면 카메라 보정)
+        // 후면 카메라에서는 원근감 때문에 엄지가 더 짧아 보일 수 있으므로 기준을 약간 더 낮출 수도 있음
         const thumbIndexDist = Math.hypot(landmarks[4].x - landmarks[5].x, landmarks[4].y - landmarks[5].y);
         const isThumbOpen = thumbIndexDist > THUMB_OPEN_THRESHOLD; 
         const isThumbClosed = !isThumbOpen;
 
         const hasBlocks = blocks.length > 0;
 
-        // [모드 1] 회전
+        // [모드 1] 회전 (검지+중지 Open / 엄지 Closed)
         if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbClosed && isRingClosed && isPinkyClosed) {
             isScaling = false; 
             isPanning = false;
@@ -276,7 +272,7 @@ function onResults(results) {
             showGuideText("🔄 화면 회전");
         }
         
-        // [모드 2] 확대/축소
+        // [모드 2] 확대/축소 (검지+엄지 Open)
         else if (hasBlocks && isIndexOpen && isThumbOpen && isMiddleClosed && isRingClosed && isPinkyClosed) {
             isRotating = false; 
             isPanning = false;
@@ -295,7 +291,7 @@ function onResults(results) {
             showGuideText(`🔍 크기 조절: ${percent}%`);
         }
 
-        // [모드 3] 중심 이동
+        // [모드 3] 중심 이동 (검지+중지+엄지 Open)
         else if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbOpen && isRingClosed && isPinkyClosed) {
             isRotating = false;
             isScaling = false;
@@ -323,7 +319,7 @@ function onResults(results) {
             showGuideText("🖐️ 중심 이동");
         }
 
-        // [모드 4] 설치 OR 삭제
+        // [모드 4] 설치 OR 삭제 (검지 ☝️)
         else if (isIndexOpen && isThumbClosed && isMiddleClosed && isRingClosed && isPinkyClosed) {
             isRotating = false;
             isScaling = false;
@@ -361,20 +357,16 @@ function onResults(results) {
 }
 
 function processPlacement(indexTip, isInitialMode) {
-    // [중요] 마우스(터치) 좌표 계산 시, 후면 카메라는 좌우 반전을 안 하므로 계산식이 달라짐
     if (isFrontCamera) {
-        // 전면: 기존과 동일 (거울 모드)
         mouse.x = ((1 - indexTip.x) * 2) - 1; 
     } else {
-        // 후면: 반전 없음 (MediaPipe 좌표 그대로 사용)
-        // MediaPipe x는 0(왼쪽) ~ 1(오른쪽) -> Three.js -1(왼쪽) ~ 1(오른쪽)
-        // 공식: (x * 2) - 1
         mouse.x = (indexTip.x * 2) - 1; 
     }
-    mouse.y = ((1 - indexTip.y) * 2) - 1; // Y축은 공통
+    mouse.y = ((1 - indexTip.y) * 2) - 1; 
 
     raycaster.setFromCamera(mouse, camera);
 
+    // [삭제 모드]
     if (isEraserMode && !isInitialMode) {
         const intersects = raycaster.intersectObjects(blockGroup.children);
         
@@ -394,13 +386,6 @@ function processPlacement(indexTip, isInitialMode) {
 
                 const pixelX = indexTip.x * canvasElement.width;
                 const pixelY = indexTip.y * canvasElement.height;
-                // 후면 카메라일 때 링 위치 조정 (X축)
-                const drawX = isFrontCamera ? pixelX : (canvasElement.width - pixelX);
-                
-                // 링 그리기 좌표는 사실 캔버스 scale(-1, 1) 여부에 따라 달라짐.
-                // 위 onResults에서 drawImage를 처리했으므로, 여기서 복잡하게 계산할 필요 없이
-                // 그냥 indexTip 좌표를 그대로 쓰되, 캔버스 렌더링 방식에 맞춤.
-                // *간단한 해결*: 링은 항상 indexTip 위치에 그린다.
                 drawLoadingRing(pixelX, pixelY, progress, true); 
 
                 const delGeo = new THREE.BoxGeometry(BLOCK_SIZE * 1.05, BLOCK_SIZE * 1.05, BLOCK_SIZE * 1.05);
@@ -436,7 +421,7 @@ function processPlacement(indexTip, isInitialMode) {
         return; 
     }
 
-    // 설치 모드
+    // [설치 모드]
     let finalPoint = null;
     let finalNormal = null;
 
@@ -596,7 +581,6 @@ function clearAllBlocks() {
     updateCameraPosition();
 }
 
-// [수정] 카메라 초기화 함수 분리
 function startMediaPipeCamera() {
     mpCamera = new Camera(videoElement, {
         onFrame: async () => {
@@ -604,11 +588,10 @@ function startMediaPipeCamera() {
         },
         width: 640,
         height: 480,
-        facingMode: isFrontCamera ? 'user' : 'environment' // 카메라 모드 설정
+        facingMode: isFrontCamera ? 'user' : 'environment' 
     });
     mpCamera.start();
 
-    // CSS 미러링 처리 (전면: 반전 O, 후면: 반전 X)
     if (isFrontCamera) {
         canvasElement.style.transform = "scaleX(-1)";
     } else {
@@ -630,6 +613,5 @@ function initMediaPipe() {
     
     hands.onResults(onResults);
     
-    // 분리된 카메라 시작 함수 호출
     startMediaPipeCamera();
 }
