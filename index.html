@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#000000">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+    <link rel="manifest" href="manifest.json">
+
+    <title>AR Block Builder</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="video-and-canvas-container">
+        <video class="input_video" playsinline></video>
+        <canvas class="output_canvas"></canvas>
+    </div>
+    
+    <div id="three-canvas-container"></div>
+    
+    <div class="controls">
+        <button id="clearBtn">🗑️ 모두 지우기</button>
+    </div>
+
+    <div id="palette">
+        <div class="color-swatch" id="eraser-btn" style="background-color: #ffffff; display: flex; align-items: center; justify-content: center; font-size: 20px;">❌</div>
+        <div class="color-swatch active" style="background-color: #ff3333;" data-color="0xff3333"></div>
+        <div class="color-swatch" style="background-color: #ffaa00;" data-color="0xffaa00"></div>
+        <div class="color-swatch" style="background-color: #ffff00;" data-color="0xffff00"></div>
+        <div class="color-swatch" style="background-color: #33ff33;" data-color="0x33ff33"></div>
+        <div class="color-swatch" style="background-color: #3333ff;" data-color="0x3333ff"></div>
+        <div class="color-swatch" style="background-color: #cc33cc;" data-color="0xcc33cc"></div>
+        <div class="color-swatch" style="background-color: #ffffff;" data-color="0xffffff"></div>
+        <div class="color-swatch" style="background-color: #808080;" data-color="0x808080"></div>
+        <div class="color-swatch" style="background-color: #333333;" data-color="0x333333"></div>
+    </div>
+
+    <script src="script.js"></script>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./service-worker.js')
+                    .then(reg => console.log('Service Worker 등록 성공:', reg))
+                    .catch(err => console.log('Service Worker 등록 실패:', err));
+            });
+        }
+    </script>
+</body>
+</html>

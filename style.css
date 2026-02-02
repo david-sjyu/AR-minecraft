@@ -1,0 +1,89 @@
+body { 
+  margin: 0; 
+  overflow: hidden; 
+  background-color: #000;
+  width: 100vw;
+  height: 100vh;
+  /* 모바일에서 당겨서 새로고침 되는 것 방지 */
+  overscroll-behavior: none;
+  touch-action: none; 
+}
+
+.video-and-canvas-container {
+  position: absolute;
+  top: 0; left: 0; width: 100%; height: 100%; z-index: 1;
+}
+.input_video { display: none; } 
+.output_canvas { 
+  width: 100%; height: 100%; object-fit: cover; /* 모바일에서 꽉 차게 변경 */
+  transform: scaleX(-1); 
+}
+
+#three-canvas-container {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; 
+}
+
+.controls {
+  position: absolute;
+  top: 15px; /* 상단 여백 조정 */
+  right: 15px; 
+  width: auto;
+  z-index: 101;
+  pointer-events: none;
+}
+
+button {
+  pointer-events: auto;
+  padding: 12px 24px; /* 버튼 터치 영역 확대 */
+  font-size: 14px; 
+  font-weight: bold;
+  cursor: pointer; 
+  background-color: rgba(68, 68, 68, 0.8); /* 반투명 배경 */
+  color: white; 
+  border: 1px solid white; 
+  border-radius: 8px;
+  /* 모바일 터치 시 하이라이트 제거 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+#palette {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  z-index: 101;
+  background-color: rgba(0, 0, 0, 0.6);
+  padding: 10px 15px;
+  border-radius: 50px;
+  pointer-events: auto;
+  
+  /* [추가] 모바일에서 색상이 많으면 가로 스크롤 되도록 설정 */
+  max-width: 90vw;
+  overflow-x: auto;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch; /* 부드러운 스크롤 */
+  
+  /* 스크롤바 숨기기 */
+  scrollbar-width: none; 
+}
+#palette::-webkit-scrollbar { display: none; }
+
+.color-swatch {
+  /* [추가] flex-shrink: 0 을 줘서 찌그러지지 않게 함 */
+  flex-shrink: 0; 
+  width: 45px; /* 터치하기 좋게 조금 키움 */
+  height: 45px;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 3px solid transparent;
+  transition: transform 0.2s, border-color 0.2s;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.color-swatch.active {
+  border-color: white;
+  transform: scale(1.1);
+}
