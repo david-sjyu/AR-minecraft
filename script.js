@@ -216,13 +216,13 @@ function detectGesture(landmarks) {
     const FAR_THRESHOLD = handSize * 0.9;   // 떨어졌다고 볼 거리
 
     // 1. [중심 이동] 엄지, 검지, 중지가 모두 가까움 (삼발이 그립)
-    if (dist_Thumb_Index < CLOSE_THRESHOLD && dist_Thumb_Middle < CLOSE_THRESHOLD && dist_Index_Middle < CLOSE_THRESHOLD) {
+    if (dist_Thumb_Index < handSize * 0.3 && dist_Thumb_Middle < handSize * 0.6 && dist_Index_Middle < handSize * 0.3) {
         return 'PAN';
     }
 
     // 2. [회전] 검지와 중지는 가깝고, 엄지는 멂 (검지,중지 붙임)
     // *추가 조건: 엄지까지 가까우면 PAN이 되므로, PAN이 아닐 때만 체크됨
-    if (dist_Index_Middle < CLOSE_THRESHOLD) {
+    if (dist_Index_Middle < handSize * 0.3) {
         return 'ROTATE';
     }
 
@@ -232,7 +232,7 @@ function detectGesture(landmarks) {
         // 이때 엄지의 위치로 설치/확대를 구분
         
         // 엄지 끝이 검지 뿌리에서 멀리 떨어져 있으면 'L자' -> 확대
-        if (dist_Thumb_Palm > handSize * 0.8) {
+        if (dist_Thumb_Palm > handSize) {
             return 'SCALE';
         }
         // 엄지가 손바닥에 붙어 있으면 -> 설치
@@ -639,3 +639,4 @@ function initMediaPipe() {
     
     startMediaPipeCamera();
 }
+
