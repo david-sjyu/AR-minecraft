@@ -24,6 +24,9 @@ let lastHoverObject = null;
 
 let isBlockPlacedInThisHover = false;
 
+// 모드 상태 변수
+let currentMode = 'NONE'; // 'INSTALL', 'ROTATE', 'SCALE', 'PAN', 'ERASER'
+
 let isRotating = false;
 let isPanning = false; 
 let isScaling = false;
@@ -39,11 +42,8 @@ let camPhi = Math.PI / 2;
 const CAM_RADIUS = 40;
 let cameraTarget = new THREE.Vector3(0, 0, 0); 
 
-const THUMB_OPEN_RATIO = 1.5; 
-
 let currentHexColor = 0xff3333; 
 let isEraserMode = false; 
-
 let isFrontCamera = true;
 
 // --- 2. 초기화 실행 ---
@@ -190,25 +190,65 @@ function animate() {
     renderer.render(scene, camera);
 }
 
-function isFingerExtended(landmarks, tipIdx, mcpIdx) {
+// [핵심] 제스처 판별 함수 (상대 거리 기반)
+function detectGesture(landmarks) {
+    // 1. 기준 척도 계산 (손목 ~ 중지 뿌리 거리) - 손의 크기에 따라 거리 기준을 맞추기 위함
     const wrist = landmarks[0];
-    const tip = landmarks[tipIdx];
-    const mcp = landmarks[mcpIdx];
+    const middleMcp = landmarks[9];
+    const handSize = Math.hypot(middleMcp.x - wrist.x, middleMcp.y - wrist.y);
 
-    const distTip = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
-    const distMcp = Math.hypot(mcp.x - wrist.x, mcp.y - wrist.y);
+    // 주요 팁 포인트
+    const thumbTip = landmarks[4];
+    const indexTip = landmarks[8];
+    const middleTip = landmarks[12];
+    const indexMcp = landmarks[5]; // 검지 뿌리
 
-    return distTip > (distMcp * 1.3);
+    // 거리 계산
+    const dist_Index_Middle = Math.hypot(indexTip.x - middleTip.x, indexTip.y - middleTip.y);
+    const dist_Thumb_Index = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+    const dist_Thumb_Middle = Math.hypot(thumbTip.x - middleTip.x, thumbTip.y - middleTip.y);
+    
+    // 엄지 끝이 검지 뿌리(손바닥)에서 얼마나 먼가? (L자 판별용)
+    const dist_Thumb_Palm = Math.hypot(thumbTip.x - indexMcp.x, thumbTip.y - indexMcp.y);
+
+    // 기준 임계값 (손 크기에 비례)
+    const CLOSE_THRESHOLD = handSize * 0.6; // 뭉쳤다고 볼 거리
+    const FAR_THRESHOLD = handSize * 0.9;   // 떨어졌다고 볼 거리
+
+    // 1. [중심 이동] 엄지, 검지, 중지가 모두 가까움 (삼발이 그립)
+    if (dist_Thumb_Index < CLOSE_THRESHOLD && dist_Thumb_Middle < CLOSE_THRESHOLD && dist_Index_Middle < CLOSE_THRESHOLD) {
+        return 'PAN';
+    }
+
+    // 2. [회전] 검지와 중지는 가깝고, 엄지는 멂 (검지,중지 붙임)
+    // *추가 조건: 엄지까지 가까우면 PAN이 되므로, PAN이 아닐 때만 체크됨
+    if (dist_Index_Middle < CLOSE_THRESHOLD) {
+        return 'ROTATE';
+    }
+
+    // 3. [설치] vs [확대] (검지와 중지가 멀 때)
+    if (dist_Index_Middle >= FAR_THRESHOLD) {
+        // 검지와 중지가 멀다는 건 검지를 폈다는 뜻.
+        // 이때 엄지의 위치로 설치/확대를 구분
+        
+        // 엄지 끝이 검지 뿌리에서 멀리 떨어져 있으면 'L자' -> 확대
+        if (dist_Thumb_Palm > handSize * 0.8) {
+            return 'SCALE';
+        }
+        // 엄지가 손바닥에 붙어 있으면 -> 설치
+        else {
+            return isEraserMode ? 'ERASER' : 'INSTALL';
+        }
+    }
+
+    return 'NONE';
 }
 
 // --- 4. MediaPipe 로직 ---
 function onResults(results) {
     canvasCtx.save();
     canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-    
-    // 캔버스 그리기 (반전 없음, CSS 처리)
     canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
-    
     canvasCtx.restore();
 
     const oldPreview = blockGroup.getObjectByName('previewBlock');
@@ -228,37 +268,18 @@ function onResults(results) {
 
         const indexTip = landmarks[8];
         const thumbTip = landmarks[4];
-        
-        // 손가락 상태 판별
-        const isIndexOpen = isFingerExtended(landmarks, 8, 5);
-        const isMiddleOpen = isFingerExtended(landmarks, 12, 9);
-        const isMiddleClosed = !isMiddleOpen;
-        const isRingClosed = !isFingerExtended(landmarks, 16, 13);
-        const isPinkyClosed = !isFingerExtended(landmarks, 20, 17);
-
-        // 엄지 판별 (비율 방식)
-        const thumbTipPos = landmarks[4];
-        const thumbIpPos = landmarks[3];
-        const thumbMcpPos = landmarks[2];
-        const thumbTotalLen = Math.hypot(thumbTipPos.x - thumbMcpPos.x, thumbTipPos.y - thumbMcpPos.y);
-        const thumbBoneLen = Math.hypot(thumbIpPos.x - thumbMcpPos.x, thumbIpPos.y - thumbMcpPos.y);
-        const thumbRatio = thumbTotalLen / thumbBoneLen;
-
-        const isThumbStrictlyOpen = thumbRatio > THUMB_OPEN_RATIO;
-        const isThumbConsideredClosed = !isThumbStrictlyOpen;
-
         const hasBlocks = blocks.length > 0;
 
-        // [중요] 카메라 모드에 따른 좌우 방향 보정값 (1: 정방향, -1: 역방향)
-        // 후면 카메라(!isFrontCamera)일 때 좌우 움직임을 반전시킴
-        const dirX = isFrontCamera ? 1 : -1;
+        // [신규] 제스처 판별
+        const gesture = detectGesture(landmarks);
+        currentMode = gesture; // 디버깅용
 
-        // ========================================================
-        // [우선순위 1] 손가락 2개 이상 (회전 / 중심 이동)
-        // ========================================================
-        
-        // 1-1. 중심 이동 (검지+중지+엄지 Open)
-        if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbStrictlyOpen && isRingClosed && isPinkyClosed) {
+        // ----------------------------------------------------
+        // 모드별 동작 실행
+        // ----------------------------------------------------
+
+        // 1. 중심 이동 (PAN) - 손가락 3개 뭉침
+        if (gesture === 'PAN' && hasBlocks) {
             isRotating = false;
             isScaling = false;
             if (!isPanning) {
@@ -274,7 +295,7 @@ function onResults(results) {
                 camRight.crossVectors(camDir, camera.up).normalize(); 
                 const camUp = new THREE.Vector3().copy(camera.up).normalize();
 
-                // [수정] dirX를 곱해서 후면 카메라일 때 반대로 이동하게 함
+                const dirX = isFrontCamera ? 1 : -1; // 후면 카메라 보정
                 const moveX = camRight.multiplyScalar(deltaX * PAN_SPEED * dirX); 
                 const moveY = camUp.multiplyScalar(deltaY * PAN_SPEED); 
 
@@ -283,11 +304,11 @@ function onResults(results) {
                 lastHandPos.x = indexTip.x;
                 lastHandPos.y = indexTip.y;
             }
-            showGuideText("🖐️ 중심 이동");
+            showGuideText("🖐️ 중심 이동 (세 손가락 뭉침)");
         }
 
-        // 1-2. 회전 (검지+중지 Open, 엄지 Closed)
-        else if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbConsideredClosed && isRingClosed && isPinkyClosed) {
+        // 2. 회전 (ROTATE) - 검지, 중지 붙임
+        else if (gesture === 'ROTATE' && hasBlocks) {
             isScaling = false; 
             isPanning = false;
             if (!isRotating) {
@@ -298,7 +319,7 @@ function onResults(results) {
                 const deltaX = (indexTip.x - lastHandPos.x) * ROTATION_SPEED;
                 const deltaY = (indexTip.y - lastHandPos.y) * ROTATION_SPEED;
                 
-                // [수정] dirX를 곱해서 후면 카메라일 때 반대로 회전하게 함
+                const dirX = isFrontCamera ? 1 : -1;
                 camTheta += deltaX * 2 * dirX; 
                 
                 camPhi -= deltaY * 2;   
@@ -306,35 +327,11 @@ function onResults(results) {
                 lastHandPos.x = indexTip.x;
                 lastHandPos.y = indexTip.y;
             }
-            showGuideText("🔄 화면 회전");
+            showGuideText("🔄 화면 회전 (검지+중지 붙임)");
         }
-        
-        // ========================================================
-        // [우선순위 2] 설치 / 삭제 (검지 ☝️)
-        // ========================================================
-        else if (isIndexOpen && isMiddleClosed && isRingClosed && isPinkyClosed && isThumbConsideredClosed) {
-            isRotating = false;
-            isScaling = false;
-            isPanning = false;
 
-            if (!hasBlocks) {
-                processPlacement(indexTip, true);
-                showGuideText("☝️ 첫 블럭 설치");
-            } else {
-                if (isEraserMode) {
-                    processPlacement(indexTip, false);
-                    showGuideText("❌ 지우개 모드");
-                } else {
-                    processPlacement(indexTip, false);
-                    showGuideText("☝️ 블럭 덧붙이기");
-                }
-            }
-        } 
-
-        // ========================================================
-        // [우선순위 3] 확대/축소 (검지+엄지 Open)
-        // ========================================================
-        else if (hasBlocks && isIndexOpen && isMiddleClosed && isRingClosed && isPinkyClosed && isThumbStrictlyOpen) {
+        // 3. 확대/축소 (SCALE) - L자 모양
+        else if (gesture === 'SCALE' && hasBlocks) {
             isRotating = false; 
             isPanning = false;
             const pinchDist = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
@@ -349,18 +346,31 @@ function onResults(results) {
                 blockGroup.scale.set(newScale, newScale, newScale);
             }
             const percent = Math.round(blockGroup.scale.x * 100);
-            showGuideText(`🔍 크기 조절: ${percent}%`);
+            showGuideText(`🔍 크기 조절: ${percent}% (L자)`);
         }
+
+        // 4. 설치 (INSTALL) 또는 지우개 (ERASER) - 검지 하나만 (엄지는 주먹)
+        else if (gesture === 'INSTALL' || gesture === 'ERASER') {
+            isRotating = false;
+            isScaling = false;
+            isPanning = false;
+
+            if (!hasBlocks) {
+                processPlacement(indexTip, true); // 초기 설치
+                showGuideText("☝️ 첫 블럭 설치");
+            } else {
+                processPlacement(indexTip, false);
+                if (isEraserMode) showGuideText("❌ 지우개 모드");
+                else showGuideText("☝️ 블럭 덧붙이기");
+            }
+        } 
         
         else {
             isRotating = false;
             isScaling = false;
             isPanning = false;
-            if (hasBlocks) {
-                showGuideText("✋ 대기 중");
-            } else {
-                showGuideText("☝️ 검지를 펴서 시작하세요");
-            }
+            if (hasBlocks) showGuideText("✋ 대기 중 (손 모양을 만드세요)");
+            else showGuideText("☝️ 검지를 펴서 시작하세요");
         }
     }
 }
