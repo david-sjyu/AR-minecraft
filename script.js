@@ -12,6 +12,9 @@ let blockGroup;
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
+// 커서 떨림 방지를 위한 변수 (Smoothing)
+let smoothMouse = new THREE.Vector2(); 
+
 const startPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 let wallMesh; 
 const mathPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); 
@@ -38,7 +41,8 @@ let camPhi = Math.PI / 2;
 const CAM_RADIUS = 40;
 let cameraTarget = new THREE.Vector3(0, 0, 0); 
 
-const THUMB_OPEN_THRESHOLD = 0.12; 
+// [수정] 엄지 인식 감도 (비율 기반이라 수치가 다름)
+const THUMB_OPEN_RATIO = 1.2; 
 
 let currentHexColor = 0xff3333; 
 let isEraserMode = false; 
@@ -55,7 +59,8 @@ window.onload = function() {
 
     document.getElementById('clearBtn').addEventListener('click', clearAllBlocks);
     document.getElementById('cameraBtn').addEventListener('click', toggleCamera);
-
+    
+    // 색상/지우개 버튼
     const swatches = document.querySelectorAll('.color-swatch');
     swatches.forEach(swatch => {
         swatch.addEventListener('click', (e) => {
@@ -85,10 +90,14 @@ function resizeCanvasToDisplaySize() {
 
 function toggleCamera() {
     isFrontCamera = !isFrontCamera; 
+    
+    // 기존 스트림 정지
     if (videoElement.srcObject) {
         const tracks = videoElement.srcObject.getTracks();
         tracks.forEach(track => track.stop());
     }
+    
+    // 카메라 재시작
     startMediaPipeCamera();
 }
 
@@ -115,6 +124,7 @@ function initThree() {
     blockGroup = new THREE.Group();
     scene.add(blockGroup);
 
+    // 투명 벽
     const wallGeo = new THREE.PlaneGeometry(10000, 10000);
     const wallMat = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }); 
     wallMesh = new THREE.Mesh(wallGeo, wallMat);
@@ -189,20 +199,19 @@ function animate() {
     renderer.render(scene, camera);
 }
 
-// [핵심 함수] 손가락이 펴졌는지 판단하는 새로운 방식 (손목 기준 거리)
-// 손등을 보이거나 손을 앞으로 뻗어도 정확하게 인식합니다.
-function isFingerExtended(landmarks, fingerTipIdx, fingerPipIdx) {
+// [핵심 수정] 손가락 인식 로직 개선
+// "손목-손가락끝 거리" vs "손목-손가락시작점(MCP) 거리" 비율로 판단
+// 이 방식은 카메라 거리나 손의 각도(손등/손바닥)에 영향을 덜 받습니다.
+function isFingerExtended(landmarks, tipIdx, mcpIdx) {
     const wrist = landmarks[0];
-    const tip = landmarks[fingerTipIdx];
-    const pip = landmarks[fingerPipIdx];
+    const tip = landmarks[tipIdx];
+    const mcp = landmarks[mcpIdx];
 
-    // 손목-끝 거리
     const distTip = Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
-    // 손목-중간관절 거리
-    const distPip = Math.hypot(pip.x - wrist.x, pip.y - wrist.y);
+    const distMcp = Math.hypot(mcp.x - wrist.x, mcp.y - wrist.y);
 
-    // 끝이 중간관절보다 손목에서 더 멀면 '펴진 것'으로 간주
-    return distTip > distPip;
+    // 팁이 MCP보다 1.3배 이상 멀리 있으면 펴진 것으로 간주
+    return distTip > (distMcp * 1.3);
 }
 
 // --- 4. MediaPipe 로직 ---
@@ -210,12 +219,10 @@ function onResults(results) {
     canvasCtx.save();
     canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
     
-    if (isFrontCamera) {
-        canvasCtx.scale(-1, 1);
-        canvasCtx.drawImage(results.image, -canvasElement.width, 0, canvasElement.width, canvasElement.height);
-    } else {
-        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
-    }
+    // [수정] 캔버스 그리기에서는 반전 로직 제거 (CSS로 처리함)
+    // 원본 그대로 그립니다. 이렇게 해야 좌표 계산이 꼬이지 않습니다.
+    canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+    
     canvasCtx.restore();
 
     const oldPreview = blockGroup.getObjectByName('previewBlock');
@@ -230,29 +237,39 @@ function onResults(results) {
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const landmarks = results.multiHandLandmarks[0];
         
+        // 뼈대 그리기
         drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
         drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 2});
 
         const indexTip = landmarks[8];
         const thumbTip = landmarks[4];
         
-        // [변경] 새로운 방식(거리 기반)으로 손가락 상태 판별
-        // 검지(8), 중지(12), 약지(16), 소지(20)는 PIP 관절(6, 10, 14, 18)과 비교
-        const isIndexOpen = isFingerExtended(landmarks, 8, 6);
-        const isMiddleOpen = isFingerExtended(landmarks, 12, 10);
+        // [개선된 손가락 판별]
+        // 8:검지끝, 5:검지시작(MCP)
+        const isIndexOpen = isFingerExtended(landmarks, 8, 5);
+        // 12:중지끝, 9:중지시작
+        const isMiddleOpen = isFingerExtended(landmarks, 12, 9);
         const isMiddleClosed = !isMiddleOpen;
-        const isRingClosed = !isFingerExtended(landmarks, 16, 14);
-        const isPinkyClosed = !isFingerExtended(landmarks, 20, 18);
+        // 16:약지끝, 13:약지시작
+        const isRingClosed = !isFingerExtended(landmarks, 16, 13);
+        // 20:소지끝, 17:소지시작
+        const isPinkyClosed = !isFingerExtended(landmarks, 20, 17);
 
-        // 엄지 상태 (기존 거리 방식 유지하되 후면 카메라 보정)
-        // 후면 카메라에서는 원근감 때문에 엄지가 더 짧아 보일 수 있으므로 기준을 약간 더 낮출 수도 있음
-        const thumbIndexDist = Math.hypot(landmarks[4].x - landmarks[5].x, landmarks[4].y - landmarks[5].y);
-        const isThumbOpen = thumbIndexDist > THUMB_OPEN_THRESHOLD; 
+        // 엄지는 구조가 달라서 MCP(2) 대신 IP(3) 등을 쓸 수도 있지만
+        // 간단히 Tip(4) vs MCP(2) 거리 비율로 체크
+        const wrist = landmarks[0];
+        const tTip = landmarks[4];
+        const tMcp = landmarks[2]; // 엄지 시작점 근처
+        const distTTip = Math.hypot(tTip.x - wrist.x, tTip.y - wrist.y);
+        const distTMcp = Math.hypot(tMcp.x - wrist.x, tMcp.y - wrist.y);
+        
+        // 엄지는 좀 더 기준이 낮아도 됨
+        const isThumbOpen = distTTip > (distTMcp * 1.2);
         const isThumbClosed = !isThumbOpen;
 
         const hasBlocks = blocks.length > 0;
 
-        // [모드 1] 회전 (검지+중지 Open / 엄지 Closed)
+        // [모드 1] 회전 (검지+중지 Open)
         if (hasBlocks && isIndexOpen && isMiddleOpen && isThumbClosed && isRingClosed && isPinkyClosed) {
             isScaling = false; 
             isPanning = false;
@@ -334,7 +351,7 @@ function onResults(results) {
             }
         } 
         
-        // [초기 모드]
+        // [초기 모드] 블럭 없음 -> 쉬운 설치
         else if (!hasBlocks && isIndexOpen && isMiddleClosed) {
             isRotating = false;
             isScaling = false;
@@ -357,14 +374,32 @@ function onResults(results) {
 }
 
 function processPlacement(indexTip, isInitialMode) {
-    if (isFrontCamera) {
-        mouse.x = ((1 - indexTip.x) * 2) - 1; 
-    } else {
-        mouse.x = (indexTip.x * 2) - 1; 
-    }
-    mouse.y = ((1 - indexTip.y) * 2) - 1; 
+    // [중요 수정] 마우스 좌표 계산 (떨림 방지 및 반전 처리)
+    let targetX, targetY;
 
-    raycaster.setFromCamera(mouse, camera);
+    if (isFrontCamera) {
+        // 전면: CSS로 반전되므로, 좌표도 반전시켜야 시각적으로 일치
+        // indexTip.x는 0(왼쪽)~1(오른쪽).
+        // 화면이 거울모드면, 내 오른손(화면 오른쪽)은 x가 0에 가까움.
+        // Three.js는 -1(왼쪽)~1(오른쪽).
+        // 식: (1 - x) * 2 - 1
+        targetX = ((1 - indexTip.x) * 2) - 1; 
+    } else {
+        // 후면: 반전 없음.
+        // indexTip.x가 0이면 왼쪽.
+        // 식: (x * 2) - 1
+        targetX = (indexTip.x * 2) - 1; 
+    }
+    targetY = ((1 - indexTip.y) * 2) - 1; // Y축은 뒤집힘 (상단이 +1이 아니라 -1이어야 함. Threejs는 위가 +1)
+    // Three.js: 위(+1), 아래(-1). MediaPipe: 위(0), 아래(1).
+    // 식: -(y * 2 - 1) = (1 - y) * 2 - 1. 맞음.
+
+    // [Smoothing] 마우스 좌표 부드럽게 이동 (떨림 방지)
+    // Lerp 값을 0.5 정도로 설정 (0.1은 느림, 0.9는 빠름)
+    smoothMouse.x += (targetX - smoothMouse.x) * 0.5;
+    smoothMouse.y += (targetY - smoothMouse.y) * 0.5;
+
+    raycaster.setFromCamera(smoothMouse, camera);
 
     // [삭제 모드]
     if (isEraserMode && !isInitialMode) {
@@ -386,7 +421,14 @@ function processPlacement(indexTip, isInitialMode) {
 
                 const pixelX = indexTip.x * canvasElement.width;
                 const pixelY = indexTip.y * canvasElement.height;
-                drawLoadingRing(pixelX, pixelY, progress, true); 
+                // 링 위치 계산 (후면일 때 X좌표 반전 주의)
+                let drawX = pixelX;
+                // 캔버스에 그릴 때는 전면일 때 CSS 반전되어 보임.
+                // drawImage는 원본.
+                // 전면: 시각적 X와 실제 X가 반대. 하지만 링은 실제 좌표에 그려야 함.
+                // 복잡함을 피하기 위해, 그냥 indexTip 비율대로 그리면 됨.
+                
+                drawLoadingRing(drawX, pixelY, progress, true); 
 
                 const delGeo = new THREE.BoxGeometry(BLOCK_SIZE * 1.05, BLOCK_SIZE * 1.05, BLOCK_SIZE * 1.05);
                 const delMat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.8 });
@@ -592,6 +634,7 @@ function startMediaPipeCamera() {
     });
     mpCamera.start();
 
+    // [중요] CSS로만 반전 처리 (캔버스 컨텍스트는 건드리지 않음)
     if (isFrontCamera) {
         canvasElement.style.transform = "scaleX(-1)";
     } else {
