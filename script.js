@@ -2,6 +2,7 @@
 let scene, camera, renderer, controls;
 let videoElement, canvasElement, canvasCtx;
 let hands;
+let mpCamera; // MediaPipe Camera 객체 저장용
 
 const BLOCK_SIZE = 2.0; 
 const GRID_SIZE = BLOCK_SIZE;
@@ -11,10 +12,7 @@ let blockGroup;
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
-// 2D 시작 평면
 const startPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
-
-// 벽면 (투명)
 let wallMesh; 
 const mathPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); 
 
@@ -45,6 +43,9 @@ const THUMB_OPEN_THRESHOLD = 0.12;
 let currentHexColor = 0xff3333; 
 let isEraserMode = false; 
 
+// [추가] 카메라 모드 상태 (true: 전면, false: 후면)
+let isFrontCamera = true;
+
 // --- 2. 초기화 실행 ---
 window.onload = function() {
     videoElement = document.getElementsByClassName('input_video')[0];
@@ -55,7 +56,10 @@ window.onload = function() {
 
     document.getElementById('clearBtn').addEventListener('click', clearAllBlocks);
     
-    // 색상 및 지우개 버튼 이벤트
+    // [추가] 카메라 전환 버튼 이벤트
+    document.getElementById('cameraBtn').addEventListener('click', toggleCamera);
+
+    // 색상 팔레트 이벤트
     const swatches = document.querySelectorAll('.color-swatch');
     swatches.forEach(swatch => {
         swatch.addEventListener('click', (e) => {
@@ -83,6 +87,20 @@ function resizeCanvasToDisplaySize() {
     canvasElement.height = window.innerHeight;
 }
 
+// [신규] 카메라 전환 함수
+function toggleCamera() {
+    isFrontCamera = !isFrontCamera; // 상태 토글
+    
+    // 기존 카메라 스트림 중지 (중요: 이걸 안 하면 카메라가 안 바뀜)
+    if (videoElement.srcObject) {
+        const tracks = videoElement.srcObject.getTracks();
+        tracks.forEach(track => track.stop());
+    }
+
+    // 카메라 다시 시작
+    startMediaPipeCamera();
+}
+
 // --- 3. Three.js 설정 ---
 function initThree() {
     scene = new THREE.Scene();
@@ -106,7 +124,6 @@ function initThree() {
     blockGroup = new THREE.Group();
     scene.add(blockGroup);
 
-    // 투명 벽
     const wallGeo = new THREE.PlaneGeometry(10000, 10000);
     const wallMat = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }); 
     wallMesh = new THREE.Mesh(wallGeo, wallMat);
@@ -118,36 +135,30 @@ function initThree() {
     cursor.name = 'cursor';
     scene.add(cursor);
 
-    // [추가] 시작 시 저장된 블럭 불러오기
     loadBlocks();
-
     animate();
 }
 
-// [신규 기능] 블럭 저장하기
 function saveBlocks() {
     const blockData = [];
     blockGroup.children.forEach(child => {
-        // 미리보기 객체는 저장하지 않음
         if (child.name !== 'previewBlock' && child.name !== 'deletePreview') {
             blockData.push({
                 x: child.position.x,
                 y: child.position.y,
                 z: child.position.z,
-                color: child.material.color.getHex() // 색상도 함께 저장
+                color: child.material.color.getHex() 
             });
         }
     });
     localStorage.setItem('myARBlocks', JSON.stringify(blockData));
 }
 
-// [신규 기능] 블럭 불러오기
 function loadBlocks() {
     const savedData = localStorage.getItem('myARBlocks');
     if (savedData) {
         const parsedData = JSON.parse(savedData);
         parsedData.forEach(data => {
-            // 불러올 때는 save=false로 하여 중복 저장 방지
             createBlock(data.x, data.y, data.z, data.color, false);
         });
     }
@@ -191,8 +202,25 @@ function animate() {
 function onResults(results) {
     canvasCtx.save();
     canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-    canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
     
+    // [중요] 후면 카메라일 때는 좌우 반전(거울 모드)을 끕니다.
+    // 전면 카메라(isFrontCamera)일 때만 이미지를 반전시켜 그림
+    if (isFrontCamera) {
+        canvasCtx.scale(-1, 1);
+        canvasCtx.drawImage(results.image, -canvasElement.width, 0, canvasElement.width, canvasElement.height);
+    } else {
+        // 후면 카메라는 있는 그대로 그림
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+    }
+    
+    // 캔버스 설정 복구 (좌표계가 꼬이지 않게)
+    canvasCtx.restore();
+
+    // 여기서부터는 좌표계가 원래대로 돌아오므로,
+    // 전면 카메라일 때 랜드마크를 그릴 때도 X좌표를 뒤집어서 그려야 합니다.
+    // 하지만 drawConnectors 유틸은 좌표를 그대로 씁니다.
+    // Three.js 레이캐스팅을 위해 mouse 좌표 계산시 이 반전 여부를 고려해야 합니다.
+
     const oldPreview = blockGroup.getObjectByName('previewBlock');
     if (oldPreview) blockGroup.remove(oldPreview);
     
@@ -204,6 +232,11 @@ function onResults(results) {
 
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         const landmarks = results.multiHandLandmarks[0];
+        
+        // 캔버스에 손 그리기
+        // (전면 카메라일 때 캔버스 자체를 CSS로 반전시키는 방법이 있고, 그리기 로직에서 반전하는 방법이 있습니다.)
+        // 기존 코드에서는 CSS transform: scaleX(-1)을 썼으므로, JS에서는 그대로 그려도 됩니다.
+        // 다만 후면 카메라일 때는 CSS 반전을 꺼야 합니다.
         
         drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
         drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 2});
@@ -325,18 +358,23 @@ function onResults(results) {
             }
         }
     }
-    canvasCtx.restore();
 }
 
 function processPlacement(indexTip, isInitialMode) {
-    mouse.x = ((1 - indexTip.x) * 2) - 1; 
-    mouse.y = ((1 - indexTip.y) * 2) - 1;
+    // [중요] 마우스(터치) 좌표 계산 시, 후면 카메라는 좌우 반전을 안 하므로 계산식이 달라짐
+    if (isFrontCamera) {
+        // 전면: 기존과 동일 (거울 모드)
+        mouse.x = ((1 - indexTip.x) * 2) - 1; 
+    } else {
+        // 후면: 반전 없음 (MediaPipe 좌표 그대로 사용)
+        // MediaPipe x는 0(왼쪽) ~ 1(오른쪽) -> Three.js -1(왼쪽) ~ 1(오른쪽)
+        // 공식: (x * 2) - 1
+        mouse.x = (indexTip.x * 2) - 1; 
+    }
+    mouse.y = ((1 - indexTip.y) * 2) - 1; // Y축은 공통
 
     raycaster.setFromCamera(mouse, camera);
 
-    // ===========================================
-    // [삭제 모드]
-    // ===========================================
     if (isEraserMode && !isInitialMode) {
         const intersects = raycaster.intersectObjects(blockGroup.children);
         
@@ -356,6 +394,13 @@ function processPlacement(indexTip, isInitialMode) {
 
                 const pixelX = indexTip.x * canvasElement.width;
                 const pixelY = indexTip.y * canvasElement.height;
+                // 후면 카메라일 때 링 위치 조정 (X축)
+                const drawX = isFrontCamera ? pixelX : (canvasElement.width - pixelX);
+                
+                // 링 그리기 좌표는 사실 캔버스 scale(-1, 1) 여부에 따라 달라짐.
+                // 위 onResults에서 drawImage를 처리했으므로, 여기서 복잡하게 계산할 필요 없이
+                // 그냥 indexTip 좌표를 그대로 쓰되, 캔버스 렌더링 방식에 맞춤.
+                // *간단한 해결*: 링은 항상 indexTip 위치에 그린다.
                 drawLoadingRing(pixelX, pixelY, progress, true); 
 
                 const delGeo = new THREE.BoxGeometry(BLOCK_SIZE * 1.05, BLOCK_SIZE * 1.05, BLOCK_SIZE * 1.05);
@@ -366,7 +411,6 @@ function processPlacement(indexTip, isInitialMode) {
                 blockGroup.add(delPreview);
 
                 if (elapsedTime >= DWELL_TIME && !isBlockPlacedInThisHover) {
-                    // 삭제 실행
                     blockGroup.remove(hitBlock);
                     const index = blocks.indexOf(hitBlock);
                     if (index > -1) blocks.splice(index, 1);
@@ -374,7 +418,6 @@ function processPlacement(indexTip, isInitialMode) {
                     if(hitBlock.geometry) hitBlock.geometry.dispose();
                     if(hitBlock.material) hitBlock.material.dispose();
 
-                    // [저장] 삭제 후 저장
                     saveBlocks();
 
                     isBlockPlacedInThisHover = true; 
@@ -393,9 +436,7 @@ function processPlacement(indexTip, isInitialMode) {
         return; 
     }
 
-    // ===========================================
-    // [설치 모드]
-    // ===========================================
+    // 설치 모드
     let finalPoint = null;
     let finalNormal = null;
 
@@ -451,9 +492,7 @@ function processPlacement(indexTip, isInitialMode) {
 
             if (elapsedTime >= DWELL_TIME && !isBlockPlacedInThisHover) {
                 if (!isBlockExist(gridX, gridY, targetZ)) {
-                    // [변경] 설치 시 저장하도록 함수 호출
                     createBlock(gridX, gridY, targetZ, currentHexColor, true);
-
                     canvasCtx.beginPath();
                     canvasCtx.arc(pixelX, pixelY, 30, 0, 2 * Math.PI);
                     canvasCtx.fillStyle = `#${currentHexColor.toString(16).padStart(6, '0')}`;
@@ -511,7 +550,6 @@ function drawLoadingRing(x, y, progress, isEraser) {
     canvasCtx.stroke();
 }
 
-// [변경] createBlock이 색상과 저장 여부(save)를 인자로 받음
 function createBlock(x, y, z, color = currentHexColor, save = true) {
     const geometry = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
     const material = new THREE.MeshStandardMaterial({ 
@@ -527,7 +565,6 @@ function createBlock(x, y, z, color = currentHexColor, save = true) {
     blockGroup.add(block);
     blocks.push(block); 
 
-    // 저장이 필요한 경우에만 저장 (불러오기 시에는 중복저장 방지)
     if (save) {
         saveBlocks();
     }
@@ -542,7 +579,6 @@ function isBlockExist(x, y, z) {
     );
 }
 
-// [변경] 모두 지우기 시 로컬 스토리지도 초기화
 function clearAllBlocks() {
     for (let i = blockGroup.children.length - 1; i >= 0; i--) {
         const child = blockGroup.children[i];
@@ -551,13 +587,33 @@ function clearAllBlocks() {
         if(child.material) child.material.dispose();
     }
     blocks.length = 0; 
-    localStorage.removeItem('myARBlocks'); // 저장소 비우기
+    localStorage.removeItem('myARBlocks'); 
     
     camTheta = 0;
     camPhi = Math.PI / 2;
     cameraTarget.set(0, 0, 0); 
     blockGroup.scale.set(1, 1, 1);
     updateCameraPosition();
+}
+
+// [수정] 카메라 초기화 함수 분리
+function startMediaPipeCamera() {
+    mpCamera = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({image: videoElement});
+        },
+        width: 640,
+        height: 480,
+        facingMode: isFrontCamera ? 'user' : 'environment' // 카메라 모드 설정
+    });
+    mpCamera.start();
+
+    // CSS 미러링 처리 (전면: 반전 O, 후면: 반전 X)
+    if (isFrontCamera) {
+        canvasElement.style.transform = "scaleX(-1)";
+    } else {
+        canvasElement.style.transform = "scaleX(1)";
+    }
 }
 
 function initMediaPipe() {
@@ -573,13 +629,7 @@ function initMediaPipe() {
     });
     
     hands.onResults(onResults);
-
-    const camera = new Camera(videoElement, {
-        onFrame: async () => {
-            await hands.send({image: videoElement});
-        },
-        width: 640,
-        height: 480
-    });
-    camera.start();
+    
+    // 분리된 카메라 시작 함수 호출
+    startMediaPipeCamera();
 }
